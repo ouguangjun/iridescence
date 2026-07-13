@@ -1,13 +1,39 @@
 #include <glk/voxelmap.hpp>
 
+#include <array>
+#include <vector>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <glk/console_colors.hpp>
+
 namespace glk {
 
+MeshRenderingOptions VoxelMapOptions::to_mesh_rendering_options() const {
+  MeshRenderingOptions opts;
+  opts.draw_faces = draw_voxels;
+  opts.override_face_color_mode = override_voxel_color_mode;
+  opts.override_face_color = override_voxel_color;
+  opts.face_color_mode = voxel_color_mode;
+  opts.face_color = voxel_color;
+
+  opts.draw_edges = draw_edges;
+  opts.override_edge_color_mode = override_edge_color_mode;
+  opts.override_edge_color = override_edge_color;
+  opts.edge_color_mode = edge_color_mode;
+  opts.edge_color = edge_color;
+  opts.edge_line_width = edge_line_width;
+  return opts;
+}
+
 void VoxelMapOptions::set_voxel_alpha(float alpha) {
+  draw_voxels = true;
   override_voxel_color = true;
   voxel_color.w() = alpha;
 }
 
 void VoxelMapOptions::set_voxel_color(const Eigen::Vector4f& color) {
+  draw_voxels = true;
   override_voxel_color_mode = true;
   override_voxel_color = true;
 
@@ -16,11 +42,13 @@ void VoxelMapOptions::set_voxel_color(const Eigen::Vector4f& color) {
 }
 
 void VoxelMapOptions::set_edge_alpha(float alpha) {
+  draw_edges = true;
   override_edge_color = true;
   edge_color.w() = alpha;
 }
 
 void VoxelMapOptions::set_edge_color(const Eigen::Vector4f& color) {
+  draw_edges = true;
   override_edge_color_mode = true;
   override_edge_color = true;
 
@@ -28,7 +56,12 @@ void VoxelMapOptions::set_edge_color(const Eigen::Vector4f& color) {
   edge_color = color;
 }
 
-VoxelMap::VoxelMap(const Eigen::Vector3i* voxel_coords, int num_voxels, double resolution, const VoxelMapOptions& options) : options(options) {
+VoxelMap::VoxelMap(const Eigen::Vector3i* voxel_coords, int num_voxels, double resolution, const VoxelMapOptions& options)
+: VoxelMap(voxel_coords, num_voxels, resolution, options.to_mesh_rendering_options()) {
+  std::cerr << glk::console::yellow << "warning: VoxelMapOptions is deprecated. Use MeshRenderingOptions instead." << glk::console::reset << std::endl;
+}
+
+VoxelMap::VoxelMap(const Eigen::Vector3i* voxel_coords, int num_voxels, double resolution, const MeshRenderingOptions& options) : options(options) {
   this->num_voxels = num_voxels;
   vao = vbo = ebo_voxels = ebo_edges = 0;
 
@@ -159,12 +192,12 @@ void VoxelMap::draw(glk::GLSLShader& shader) const {
   glVertexAttribPointer(position_loc, 3, GL_FLOAT, GL_FALSE, 0, 0);
 
   // draw voxels
-  if (options.draw_voxels) {
-    if (options.override_voxel_color_mode) {
-      shader.set_uniform("color_mode", options.voxel_color_mode);
+  if (options.draw_faces) {
+    if (options.override_face_color_mode) {
+      shader.set_uniform("color_mode", options.face_color_mode);
     }
-    if (options.override_voxel_color) {
-      shader.set_uniform("material_color", options.voxel_color);
+    if (options.override_face_color) {
+      shader.set_uniform("material_color", options.face_color);
     }
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_voxels);
