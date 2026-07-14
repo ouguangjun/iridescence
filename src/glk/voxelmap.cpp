@@ -5,6 +5,8 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <unordered_set>
+#include <glk/path.hpp>
 #include <glk/console_colors.hpp>
 
 namespace glk {
@@ -56,6 +58,10 @@ void VoxelMapOptions::set_edge_color(const Eigen::Vector4f& color) {
   edge_color = color;
 }
 
+// VoxelMap
+
+std::shared_ptr<glk::GLSLShader> VoxelMap::shader = nullptr;
+
 VoxelMap::VoxelMap(const Eigen::Vector3i* voxel_coords, int num_voxels, double resolution, const VoxelMapOptions& options)
 : VoxelMap(voxel_coords, num_voxels, resolution, options.to_mesh_rendering_options()) {
   std::cerr << glk::console::yellow << "warning: VoxelMapOptions is deprecated. Use MeshRenderingOptions instead." << glk::console::reset << std::endl;
@@ -63,12 +69,22 @@ VoxelMap::VoxelMap(const Eigen::Vector3i* voxel_coords, int num_voxels, double r
 
 VoxelMap::VoxelMap(const Eigen::Vector3i* voxel_coords, int num_voxels, double resolution, const MeshRenderingOptions& options) : options(options) {
   this->num_voxels = num_voxels;
-  vao = vbo = ebo_voxels = ebo_edges = 0;
+  this->resolution = resolution;
+  vao = cube_vbo = cube_ebo_faces = cube_ebo_edges = coords_vbo = 0;
 
-  const float res = static_cast<float>(resolution);
+  if (!shader) {
+    std::unordered_set<std::string> includes;
+    includes.insert(glk::get_data_path() + "/shader/voxelmap/rainbow_custom.vert");
 
-  // Pre-compute vertex offsets with float resolution (avoid repeated double->float conversion)
-  const std::array<Eigen::Vector3f, 8> vertex_offsets = {
+    shader = std::make_shared<GLSLShader>();
+    shader->attach_source(glk::get_data_path() + "/shader/rainbow.vert", includes, "", GL_VERTEX_SHADER);
+    shader->attach_source(glk::get_data_path() + "/shader/rainbow.frag", GL_FRAGMENT_SHADER);
+    shader->link_program();
+  }
+
+  // Pre-compute vertex offsets with float resolution
+  const float res = resolution;
+  const std::array<Eigen::Vector3f, 8> cube_vertices = {
     Eigen::Vector3f(0.0f, 0.0f, 0.0f),
     Eigen::Vector3f(res, 0.0f, 0.0f),
     Eigen::Vector3f(res, res, 0.0f),
@@ -79,7 +95,7 @@ VoxelMap::VoxelMap(const Eigen::Vector3i* voxel_coords, int num_voxels, double r
     Eigen::Vector3f(0.0f, res, res),
   };
 
-  static constexpr std::array<unsigned int, 36> voxel_index_offsets = {
+  static constexpr std::array<unsigned int, 36> cube_face_indices = {
     0, 1, 2, 0, 2, 3,  //
     4, 5, 6, 4, 6, 7,  //
     0, 1, 5, 0, 5, 4,  //
@@ -88,139 +104,120 @@ VoxelMap::VoxelMap(const Eigen::Vector3i* voxel_coords, int num_voxels, double r
     3, 0, 4, 3, 4, 7,  //
   };
 
-  static constexpr std::array<unsigned int, 24> edge_index_offsets = {
+  static constexpr std::array<unsigned int, 24> cube_edge_indices = {
     0, 1, 1, 2, 2, 3, 3, 0,  //
     4, 5, 5, 6, 6, 7, 7, 4,  //
     0, 4, 1, 5, 2, 6, 3, 7,  //
   };
 
-  const GLsizeiptr vertex_buf_size = static_cast<GLsizeiptr>(sizeof(Eigen::Vector3f)) * num_voxels * 8;
-  const GLsizeiptr voxel_idx_buf_size = static_cast<GLsizeiptr>(sizeof(unsigned int)) * num_voxels * 36;
-  const GLsizeiptr edge_idx_buf_size = static_cast<GLsizeiptr>(sizeof(unsigned int)) * num_voxels * 24;
-  constexpr GLbitfield map_flags = GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_UNSYNCHRONIZED_BIT;
-
   // Create all GL objects and allocate buffers upfront
   glGenVertexArrays(1, &vao);
   glBindVertexArray(vao);
 
-  glGenBuffers(1, &vbo);
-  glGenBuffers(1, &ebo_voxels);
-  glGenBuffers(1, &ebo_edges);
+  glGenBuffers(1, &cube_vbo);
+  glGenBuffers(1, &cube_ebo_faces);
+  glGenBuffers(1, &cube_ebo_edges);
+  glGenBuffers(1, &coords_vbo);
 
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  glBufferData(GL_ARRAY_BUFFER, vertex_buf_size, nullptr, GL_STATIC_DRAW);
+  glBindBuffer(GL_ARRAY_BUFFER, cube_vbo);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(Eigen::Vector3f) * cube_vertices.size(), cube_vertices.data(), GL_STATIC_DRAW);
 
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_voxels);
-  glBufferData(GL_ELEMENT_ARRAY_BUFFER, voxel_idx_buf_size, nullptr, GL_STATIC_DRAW);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, cube_ebo_faces);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(unsigned int) * cube_face_indices.size(), cube_face_indices.data(), GL_STATIC_DRAW);
 
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_edges);
-  glBufferData(GL_ELEMENT_ARRAY_BUFFER, edge_idx_buf_size, nullptr, GL_STATIC_DRAW);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, cube_ebo_edges);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(unsigned int) * cube_edge_indices.size(), cube_edge_indices.data(), GL_STATIC_DRAW);
 
-  // Map all three buffers simultaneously
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  auto* vertices = static_cast<Eigen::Vector3f*>(glMapBufferRange(GL_ARRAY_BUFFER, 0, vertex_buf_size, map_flags));
-
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_voxels);
-  auto* voxel_indices = static_cast<unsigned int*>(glMapBufferRange(GL_ELEMENT_ARRAY_BUFFER, 0, voxel_idx_buf_size, map_flags));
-
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_edges);
-  auto* edge_indices = static_cast<unsigned int*>(glMapBufferRange(GL_ELEMENT_ARRAY_BUFFER, 0, edge_idx_buf_size, map_flags));
-
-  // Fill face indices
-  for (int i = 0; i < num_voxels; i++) {
-    const unsigned int base = i * 8;
-    unsigned int* dst = voxel_indices + i * 36;
-    for (int j = 0; j < 36; j++) {
-      dst[j] = base + voxel_index_offsets[j];
-    }
-  }
-
-  // Fill edge indices
-  for (int i = 0; i < num_voxels; i++) {
-    const unsigned int base = i * 8;
-    unsigned int* dst = edge_indices + i * 24;
-    for (int j = 0; j < 24; j++) {
-      dst[j] = base + edge_index_offsets[j];
-    }
-  }
-
-  // Fill vertices
-  for (int i = 0; i < num_voxels; i++) {
-    const Eigen::Vector3f origin = voxel_coords[i].cast<float>() * res;
-    Eigen::Vector3f* dst = vertices + i * 8;
-    for (int j = 0; j < 8; j++) {
-      dst[j] = origin + vertex_offsets[j];
-    }
-  }
-
-  // Unmap all buffers (driver can now DMA the data to VRAM)
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  glUnmapBuffer(GL_ARRAY_BUFFER);
-
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_voxels);
-  glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
-
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_edges);
-  glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+  // Per-instance voxel coordinates (Eigen::Vector3i is tightly packed as 3 ints)
+  glBindBuffer(GL_ARRAY_BUFFER, coords_vbo);
+  glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(sizeof(Eigen::Vector3i)) * num_voxels, voxel_coords, GL_STATIC_DRAW);
 
   glBindVertexArray(0);
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
+VoxelMap::VoxelMap(const std::vector<Eigen::Vector3i>& voxel_coords, double resolution, const MeshRenderingOptions& options)
+: VoxelMap(voxel_coords.data(), static_cast<int>(voxel_coords.size()), resolution, options) {}
+
 VoxelMap::~VoxelMap() {
-  if (ebo_edges) {
-    glDeleteBuffers(1, &ebo_edges);
+  if (coords_vbo) {
+    glDeleteBuffers(1, &coords_vbo);
   }
-  if (ebo_voxels) {
-    glDeleteBuffers(1, &ebo_voxels);
+  if (cube_ebo_faces) {
+    glDeleteBuffers(1, &cube_ebo_faces);
   }
-  if (vbo) {
-    glDeleteBuffers(1, &vbo);
+  if (cube_ebo_edges) {
+    glDeleteBuffers(1, &cube_ebo_edges);
+  }
+  if (cube_vbo) {
+    glDeleteBuffers(1, &cube_vbo);
   }
   if (vao) {
     glDeleteVertexArrays(1, &vao);
   }
 }
 
-void VoxelMap::draw(glk::GLSLShader& shader) const {
+void VoxelMap::draw(glk::GLSLShader& shader_) const {
+  shader->use();
+
+  shader_.copy_cached_uniforms(*shader);
+  shader->set_uniform("voxel_resolution", resolution);
+
   glBindVertexArray(vao);
 
-  GLint position_loc = shader.attrib("vert_position");
+  GLint position_loc = shader->attrib("vert_position");
   glEnableVertexAttribArray(position_loc);
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+  GLint voxel_coord_loc = shader->attrib("voxel_coord");
+  glEnableVertexAttribArray(voxel_coord_loc);
+
+  // Per-vertex cube geometry
+  glBindBuffer(GL_ARRAY_BUFFER, cube_vbo);
   glVertexAttribPointer(position_loc, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+  // Per-instance voxel coordinates (advance once per voxel)
+  glBindBuffer(GL_ARRAY_BUFFER, coords_vbo);
+  glVertexAttribIPointer(voxel_coord_loc, 3, GL_INT, sizeof(Eigen::Vector3i), 0);
+  glVertexAttribDivisor(voxel_coord_loc, 1);
 
   // draw voxels
   if (options.draw_faces) {
     if (options.override_face_color_mode) {
-      shader.set_uniform("color_mode", options.face_color_mode);
+      shader->set_uniform("color_mode", options.face_color_mode);
     }
     if (options.override_face_color) {
-      shader.set_uniform("material_color", options.face_color);
+      shader->set_uniform("material_color", options.face_color);
     }
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_voxels);
-    glDrawElements(GL_TRIANGLES, num_voxels * 36, GL_UNSIGNED_INT, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, cube_ebo_faces);
+    glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0, num_voxels);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
   }
 
   // draw edges
   if (options.draw_edges) {
     if (options.override_edge_color_mode) {
-      shader.set_uniform("color_mode", options.edge_color_mode);
+      shader->set_uniform("color_mode", options.edge_color_mode);
     }
     if (options.override_edge_color) {
-      shader.set_uniform("material_color", options.edge_color);
+      shader->set_uniform("material_color", options.edge_color);
     }
 
     glLineWidth(options.edge_line_width);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_edges);
-    glDrawElements(GL_LINES, num_voxels * 24, GL_UNSIGNED_INT, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, cube_ebo_edges);
+    glDrawElementsInstanced(GL_LINES, 24, GL_UNSIGNED_INT, 0, num_voxels);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
   }
 
+  glVertexAttribDivisor(voxel_coord_loc, 0);
+  glDisableVertexAttribArray(voxel_coord_loc);
   glDisableVertexAttribArray(position_loc);
+
+  glBindVertexArray(0);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+  shader_.use();
 }
 
 }  // namespace glk
