@@ -95,7 +95,7 @@ void GridMap::update_color(int width, int height, float scale, const float* valu
 }
 
 GridMap::~GridMap() {
-  glDeleteBuffers(1, &vao);
+  glDeleteVertexArrays(1, &vao);
   glDeleteBuffers(1, &vbo);
   glDeleteBuffers(1, &tbo);
 }
